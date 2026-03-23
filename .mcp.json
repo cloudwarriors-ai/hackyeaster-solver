@@ -1,6 +1,6 @@
 {
   "hackyeaster": {
-    "command": "bash",
-    "args": ["-c", "uv run --directory $HOME/code/hackyeaster-solver python -m hackyeaster_mcp.server"]
+    "command": "uvx",
+    "args": ["--from", "git+https://github.com/cloudwarriors-ai/hackyeaster-solver", "hackyeaster-mcp"]
   }
 }

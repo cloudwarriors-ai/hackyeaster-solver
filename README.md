@@ -4,11 +4,7 @@ MCP server for Claude-driven [HackyEaster](https://www.hackyeaster.com/) CTF sol
 
 ## Setup
 
-```bash
-git clone https://github.com/cloudwarriors-ai/hackyeaster-solver.git
-cd hackyeaster-solver
-uv sync
-```
+### Quick install (no clone needed)
 
 Add to your `~/.mcp.json`:
 
@@ -16,14 +12,37 @@ Add to your `~/.mcp.json`:
 {
   "mcpServers": {
     "hackyeaster": {
-      "command": "bash",
-      "args": ["-c", "uv run --directory $HOME/code/hackyeaster-solver python -m hackyeaster_mcp.server"]
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/cloudwarriors-ai/hackyeaster-solver", "hackyeaster-mcp"]
     }
   }
 }
 ```
 
 Restart Claude Code. The `he_*` tools will appear in the MCP servers panel.
+
+### Local development
+
+If you want to modify the server or keep persistent state in a known location:
+
+```bash
+git clone https://github.com/cloudwarriors-ai/hackyeaster-solver.git
+cd hackyeaster-solver
+uv sync
+```
+
+Then in `~/.mcp.json`, point at your local clone:
+
+```json
+{
+  "mcpServers": {
+    "hackyeaster": {
+      "command": "bash",
+      "args": ["-c", "uv run --directory /path/to/hackyeaster-solver python -m hackyeaster_mcp.server"]
+    }
+  }
+}
+```
 
 ## Tools
 
