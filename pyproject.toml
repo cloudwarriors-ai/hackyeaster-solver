@@ -12,6 +12,7 @@ dependencies = [
   "lxml>=5.0",
   "mcp>=1.0.0",
   "Pillow>=10.0",
+  "requests>=2.31",
 ]
 
 [project.scripts]

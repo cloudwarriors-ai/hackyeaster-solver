@@ -10,10 +10,10 @@ from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, ImageContent, Tool
+from mcp.types import ImageContent, TextContent, Tool
 
 from . import ctfutils, discovery, state
-from .fetcher import download_bytes, fetch_page
+from .fetcher import auth_get, auth_post, download_resource, fetch_page
 
 app = Server("hackyeaster")
 
@@ -150,6 +150,46 @@ TOOLS = [
             "required": ["text"],
         },
     ),
+    Tool(
+        name="he_submit_flag",
+        description=(
+            "Submit a flag for a challenge via the authenticated HackyEaster API. "
+            "POSTs to /app/rest/user/challenge/{id}/checkflag. "
+            "Returns the API response (accepted/rejected/already-solved)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "challenge_id": {
+                    "type": "string",
+                    "description": "Numeric or slug challenge ID as used in the HackyEaster URL",
+                },
+                "flag": {
+                    "type": "string",
+                    "description": "The flag string to submit, e.g. he2026{abc123}",
+                },
+            },
+            "required": ["challenge_id", "flag"],
+        },
+    ),
+    Tool(
+        name="he_download_file",
+        description=(
+            "Download a challenge's attached file via the authenticated HackyEaster API. "
+            "Fetches /app/rest/user/challenge/{id}/file and saves to the data/ directory. "
+            "Returns the saved path, filename, content-type, and size in bytes."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "challenge_id": {
+                    "type": "string",
+                    "description": "Numeric or slug challenge ID",
+                },
+            },
+            "required": ["challenge_id"],
+        },
+    ),
 ]
 
 
@@ -211,31 +251,47 @@ async def _dispatch(name: str, args: dict) -> list[TextContent | ImageContent]:
 
     if name == "he_analyze_image":
         url = args["url"]
-        raw = await asyncio.to_thread(download_bytes, url)
+        download = await asyncio.to_thread(download_resource, url)
+        raw = download.body
 
         contents: list[TextContent | ImageContent] = []
 
+        if not raw:
+            payload = {
+                "status": download.status,
+                "final_url": download.final_url,
+                "content_type": download.content_type,
+                "error": "No bytes returned for image analysis.",
+            }
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+        mime = _guess_image_mime(raw, download.content_type)
+        if mime is None:
+            payload = {
+                "status": download.status,
+                "final_url": download.final_url,
+                "content_type": download.content_type,
+                "byte_length": len(raw),
+                "error": "URL did not return image bytes.",
+            }
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
         # Return image as base64 for Claude to see
         b64 = base64.b64encode(raw).decode("ascii")
-        # Guess mime type
-        mime = "image/png"
-        if raw[:3] == b"\xff\xd8\xff":
-            mime = "image/jpeg"
-        elif raw[:4] == b"\x89PNG":
-            mime = "image/png"
-        elif raw[:4] == b"GIF8":
-            mime = "image/gif"
-        elif raw[:4] == b"RIFF":
-            mime = "image/webp"
-
         contents.append(ImageContent(type="image", data=b64, mimeType=mime))
 
         # Try QR/barcode detection
         qr_results = _try_qr_decode(raw)
         if qr_results:
-            contents.append(TextContent(type="text", text=f"QR/Barcode detected: {json.dumps(qr_results)}"))
+            detected = f"QR/Barcode detected: {json.dumps(qr_results)}"
+            contents.append(TextContent(type="text", text=detected))
         else:
-            contents.append(TextContent(type="text", text="No QR/barcode detected (pyzbar may not be installed)"))
+            contents.append(
+                TextContent(
+                    type="text",
+                    text="No QR/barcode detected (pyzbar may not be installed)",
+                )
+            )
 
         return contents
 
@@ -260,6 +316,60 @@ async def _dispatch(name: str, args: dict) -> list[TextContent | ImageContent]:
         result = ctfutils.validate_flag(args["text"])
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+    if name == "he_submit_flag":
+        challenge_id = args["challenge_id"]
+        flag = args["flag"]
+        api_url = f"https://26.hackyeaster.com/app/rest/user/challenge/{challenge_id}/checkflag"
+        resp = await asyncio.to_thread(
+            auth_post,
+            api_url,
+            json={"flag": flag},
+        )
+        payload = {
+            "status_code": resp.status_code,
+            "url": api_url,
+            "challenge_id": challenge_id,
+            "flag": flag,
+        }
+        try:
+            payload["response"] = resp.json()
+        except Exception:
+            payload["response_text"] = resp.text[:2000]
+        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+    if name == "he_download_file":
+        challenge_id = args["challenge_id"]
+        api_url = f"https://26.hackyeaster.com/app/rest/user/challenge/{challenge_id}/file"
+        resp = await asyncio.to_thread(auth_get, api_url)
+        resp.raise_for_status()
+
+        # Derive a filename from Content-Disposition or fall back to challenge_id
+        content_disposition = resp.headers.get("Content-Disposition", "")
+        filename = ""
+        if "filename=" in content_disposition:
+            filename = content_disposition.split("filename=")[-1].strip().strip('"')
+        if not filename:
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            ext = content_type.split(";")[0].strip().split("/")[-1]
+            # Normalise common sub-types
+            ext = {"jpeg": "jpg", "plain": "txt", "octet-stream": "bin"}.get(ext, ext)
+            filename = f"challenge_{challenge_id}.{ext}"
+
+        save_dir = DATA_DIR / "challenge_files"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / filename
+        save_path.write_bytes(resp.content)
+
+        payload = {
+            "saved_path": str(save_path),
+            "filename": filename,
+            "content_type": resp.headers.get("Content-Type", ""),
+            "size_bytes": len(resp.content),
+            "challenge_id": challenge_id,
+            "url": api_url,
+        }
+        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
@@ -276,6 +386,23 @@ def _try_qr_decode(image_bytes: bytes) -> list[str]:
         return []
     except Exception:
         return []
+
+
+def _guess_image_mime(image_bytes: bytes, content_type: str) -> str | None:
+    guessed = content_type.split(";", 1)[0].strip().lower()
+    if guessed.startswith("image/"):
+        return guessed
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if image_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    if image_bytes[:4] == b"GIF8":
+        return "image/gif"
+    if image_bytes[:12].startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.lstrip().startswith(b"<svg"):
+        return "image/svg+xml"
+    return None
 
 
 def main():
